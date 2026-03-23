@@ -1,0 +1,532 @@
+---
+name: Offsite Attendance Registration
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number for the offsite attendance tracker'
+        required: true
+        type: string
+      attendance_status:
+        description: 'Will you attend in-person?'
+        required: true
+        type: choice
+        options:
+          - attending
+          - unsure
+          - not_attending
+      allergies:
+        description: 'Any allergies? (optional)'
+        required: false
+        type: string
+        default: ''
+      dietary_requirements:
+        description: 'Dietary restrictions or preferences? (optional)'
+        required: false
+        type: string
+        default: ''
+      arrival_flight:
+        description: 'Arrival flight — Date / Time / Airport (e.g., March 9, 2026 / 2:30 PM / NRT)'
+        required: false
+        type: string
+        default: ''
+      departure_flight:
+        description: 'Departure flight — Date / Time / Airport (e.g., March 13, 2026 / 5:00 PM / HND)'
+        required: false
+        type: string
+        default: ''
+
+  # Also trigger when the issue body is manually edited (to recount summaries)
+  issues:
+    types: [edited]
+
+jobs:
+  register-attendance:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: attendance-${{ github.event.inputs.issue_number }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Register attendance and update issue
+        uses: actions/github-script@v7
+        env:
+          HUBBERS_TOKEN: ${{ secrets.HUBBERS_READ_TOKEN }}
+        with:
+          script: |
+            const issueNumber = parseInt('${{ github.event.inputs.issue_number }}', 10);
+            const username = context.actor;
+            const attendanceStatus = '${{ github.event.inputs.attendance_status }}';
+            const allergies = `${{ github.event.inputs.allergies }}`;
+            const dietary = `${{ github.event.inputs.dietary_requirements }}`;
+            const arrival = `${{ github.event.inputs.arrival_flight }}`;
+            const departure = `${{ github.event.inputs.departure_flight }}`;
+
+            // ── Emoji mapping ──────────────────────────────────────────
+            const STATUS_EMOJI = { attending: '👍', unsure: '😐', not_attending: '👎' };
+            const attendanceEmoji = STATUS_EMOJI[attendanceStatus] || '';
+
+            // ── Sanitise user input for markdown table safety ──────────
+            const sanitize = (str) => {
+              if (!str) return '';
+              return str
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;')
+                .replace(/\|/g, '&#124;');
+            };
+
+            const safeAllergies   = sanitize(allergies);
+            const safeDietary     = sanitize(dietary);
+            const safeArrival     = sanitize(arrival);
+            const safeDeparture   = sanitize(departure);
+
+            // ── Fetch hubbers.yml from github/thehub ───────────────────
+            console.log('Fetching hubbers.yml …');
+            let hubbers = {};    // github_login → { name, manager, country }
+
+            try {
+              const hubbersToken = process.env.HUBBERS_TOKEN;
+              const metaResp = await fetch(
+                'https://api.github.com/repos/github/thehub/contents/docs/_data/hubbers.yml',
+                { headers: { Authorization: `token ${hubbersToken}`, Accept: 'application/vnd.github.v3+json' } }
+              );
+
+              let content;
+              if (metaResp.ok) {
+                const meta = await metaResp.json();
+                if (meta.size > 1_000_000 || !meta.content) {
+                  // Large file → use download_url
+                  const rawResp = await fetch(meta.download_url, {
+                    headers: { Authorization: `token ${hubbersToken}` }
+                  });
+                  content = await rawResp.text();
+                } else {
+                  content = Buffer.from(meta.content, 'base64').toString('utf-8');
+                }
+
+                // Simple YAML parser (same approach as oncall-pay)
+                let currentUser = null;
+                let currentData = {};
+                for (const line of content.split('\n')) {
+                  if (line && !line.startsWith(' ') && !line.startsWith('\t') && line.includes(':')) {
+                    if (currentUser && currentData.name) {
+                      hubbers[currentUser] = { ...currentData };
+                      hubbers[currentUser.toLowerCase()] = { ...currentData };
+                    }
+                    currentUser = line.split(':')[0].trim();
+                    currentData = {};
+                  } else if (currentUser) {
+                    const trimmed = line.trim();
+                    if (trimmed.startsWith('name:'))    currentData.name    = trimmed.split(':').slice(1).join(':').trim();
+                    if (trimmed.startsWith('manager:')) currentData.manager = trimmed.split(':').slice(1).join(':').trim();
+                    if (trimmed.startsWith('country:')) currentData.country = trimmed.split(':').slice(1).join(':').trim();
+                    if (trimmed.startsWith('github_login:')) currentData.github_login = trimmed.split(':').slice(1).join(':').trim();
+                    if (trimmed.startsWith('cost_center:')) currentData.cost_center = trimmed.split(':').slice(1).join(':').trim();
+                  }
+                }
+                // Don't forget the last entry
+                if (currentUser && currentData.name) {
+                  hubbers[currentUser] = { ...currentData };
+                  hubbers[currentUser.toLowerCase()] = { ...currentData };
+                }
+                console.log(`Loaded ${Object.keys(hubbers).length / 2} hubber entries`);
+              } else {
+                console.log(`Warning: Could not fetch hubbers.yml (HTTP ${metaResp.status}). Continuing without team data.`);
+              }
+            } catch (err) {
+              console.log(`Warning: Error fetching hubbers.yml: ${err.message}. Continuing without team data.`);
+            }
+
+            // ── Resolve user → manager → director ──────────────────────
+            const userInfo = hubbers[username] || hubbers[username.toLowerCase()] || {};
+            const managerLogin = userInfo.manager || '';
+            const managerInfo = managerLogin ? (hubbers[managerLogin] || hubbers[managerLogin.toLowerCase()] || {}) : {};
+            const directorLogin = managerInfo.manager || '';
+
+            console.log(`User: @${username}, Manager: ${managerLogin || '(unknown)'}, Director: ${directorLogin || '(unknown)'}`);
+
+            // ── Get issue body ──────────────────────────────────────────
+            const issue = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber
+            });
+
+            let body = issue.data.body;
+            if (!body) {
+              core.setFailed('Issue body is empty');
+              return;
+            }
+
+            // ── Attendance table regex (same as existing workflow) ──────
+            const TABLE_RE = /(\|[^\n]*Your Handle[^\n]*\|[\r\n]+\|[-|\s]+\|[\r\n]+)((?:\|[^\n]*(?:\n|$))*?)(?=\n\n|\n[^|]|$)/i;
+            const tableMatch = body.match(TABLE_RE);
+
+            if (!tableMatch) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber,
+                body: `@${username} ⚠️ Could not find an attendance table (requires a "Your Handle" column).`
+              });
+              core.setFailed('Attendance table not found');
+              return;
+            }
+
+            const tableHeader = tableMatch[1];
+            let tableRows = tableMatch[2];
+
+            // ── Detect columns dynamically ──────────────────────────────
+            const headerLine = tableHeader.split('\n')[0];
+            const columns = headerLine.split('|').map(c => c.trim()).filter(Boolean);
+            const norm = (n) => n.replace(/[*_]/g, '').trim().toLowerCase();
+
+            const columnData = {
+              'your handle':   `@${username}`,
+              'manager':       managerLogin ? `@${managerLogin}` : '',
+              'team':          directorLogin ? `@${directorLogin}` : '',
+              'microsoft id':  '',          // not collected in this flow
+              'attendance':    attendanceEmoji,
+              'allergies':     safeAllergies,
+              'dietary requirements': safeDietary,
+              'arrival flight': safeArrival,
+              'arrival flight date/time/airport': safeArrival,
+              'departure flight': safeDeparture,
+              'departure flight date/time/airport': safeDeparture,
+            };
+
+            const rowValues = columns.map(c => columnData[norm(c)] ?? '');
+            const newRow = `| ${rowValues.join(' | ')} |`;
+
+            // ── Insert or update user row ────────────────────────────────
+            const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const userRe = new RegExp(`^\\s*\\|\\s*@?${escRe(username)}\\s*\\|`, 'm');
+
+            if (userRe.test(tableRows)) {
+              tableRows = tableRows.replace(
+                new RegExp(`^\\s*\\|\\s*@?${escRe(username)}\\s*\\|[^\\n]*`, 'gm'),
+                newRow
+              );
+            } else {
+              tableRows = tableRows.trimEnd() + (tableRows.trim() ? '\n' : '') + newRow + '\n';
+            }
+
+            // ── Count attendance & build team summary ───────────────────
+            const attColIdx = columns.findIndex(c => norm(c) === 'attendance');
+            const handleColIdx = columns.findIndex(c => norm(c) === 'your handle');
+
+            // Build full roster of each manager's ICs from hubbers data
+            // so we can identify who has NOT yet responded
+            const mgrToICs = {};  // { managerLogin: Set of IC logins }
+            for (const [login, info] of Object.entries(hubbers)) {
+              if (login !== login.toLowerCase()) continue;  // skip duplicate cased keys
+              if (info.manager) {
+                if (!mgrToICs[info.manager]) mgrToICs[info.manager] = new Set();
+                mgrToICs[info.manager].add(login);
+              }
+            }
+
+            // Parse every row for attendance + team info
+            // Structure: directors → managers → [{ handle, status }]
+            const teamTree = {};   // { directorLogin: { managerLogin: [{ handle, emoji }] } }
+            const respondedHandles = new Set();  // track who has a row in the table
+            let attending = 0, unsure = 0, notAttending = 0;
+
+            for (const row of tableRows.split('\n').filter(r => r.trim().startsWith('|'))) {
+              const cells = row.split('|').map(c => c.trim()).slice(1);
+              if (cells.every(c => !c || /^:?-+:?$/.test(c))) continue;   // separator row
+
+              const handle = (cells[handleColIdx] || '').replace(/^@/, '').trim();
+              if (!handle) continue;
+              respondedHandles.add(handle.toLowerCase());
+
+              let emoji = (cells[attColIdx] || '').replace(/[*_`]/g, '').trim();
+              if (emoji === '👍') attending++;
+              else if (emoji === '😐') unsure++;
+              else if (emoji === '👎') notAttending++;
+
+              // Look up this row's user in hubbers
+              const rowUser = hubbers[handle] || hubbers[handle.toLowerCase()] || {};
+              const rowMgr  = rowUser.manager || 'Unknown Manager';
+              const mgrData = hubbers[rowMgr] || hubbers[rowMgr.toLowerCase()] || {};
+              const rowDir  = mgrData.manager || 'Unknown Director';
+
+              if (!teamTree[rowDir]) teamTree[rowDir] = {};
+              if (!teamTree[rowDir][rowMgr]) teamTree[rowDir][rowMgr] = [];
+              teamTree[rowDir][rowMgr].push({ handle, emoji });
+            }
+
+            // Find ICs who haven't responded for managers that appear in the tree
+            // Also discover managers whose entire team is missing
+            const allManagersInTree = new Set();
+            for (const managers of Object.values(teamTree)) {
+              for (const mgr of Object.keys(managers)) allManagersInTree.add(mgr);
+            }
+            // Add the registering user's manager even if no one else responded yet
+            if (managerLogin) allManagersInTree.add(managerLogin);
+
+            let noResponse = 0;
+            for (const mgr of allManagersInTree) {
+              const ics = mgrToICs[mgr] || mgrToICs[mgr.toLowerCase()] || new Set();
+              const mgrData = hubbers[mgr] || hubbers[mgr.toLowerCase()] || {};
+              const dir = mgrData.manager || 'Unknown Director';
+              if (!teamTree[dir]) teamTree[dir] = {};
+              if (!teamTree[dir][mgr]) teamTree[dir][mgr] = [];
+
+              for (const ic of ics) {
+                if (!respondedHandles.has(ic.toLowerCase())) {
+                  noResponse++;
+                  teamTree[dir][mgr].push({ handle: ic, emoji: '❓' });
+                }
+              }
+            }
+
+            const totalResponded = attending + unsure + notAttending;
+            const totalExpected = totalResponded + noResponse;
+            console.log(`Attendance: 👍 ${attending} · 😐 ${unsure} · 👎 ${notAttending} · ❓ ${noResponse} · Responded: ${totalResponded}/${totalExpected}`);
+
+            // ── Build hierarchical summary ──────────────────────────────
+            const MONTH_NAMES = ['January','February','March','April','May','June',
+                                 'July','August','September','October','November','December'];
+            const now = new Date();
+            const ts = `${MONTH_NAMES[now.getUTCMonth()]} ${now.getUTCDate()}, ${now.getUTCFullYear()} at ${
+              (now.getUTCHours() % 12 || 12)}:${String(now.getUTCMinutes()).padStart(2,'0')} ${
+              now.getUTCHours() >= 12 ? 'PM' : 'AM'} UTC`;
+
+            const marker = '<!-- attendance-summary-auto-generated -->';
+
+            let summary = `${marker}\n`;
+            summary += `**Attendance Summary:** 👍 ${attending} attending · 😐 ${unsure} unsure · 👎 ${notAttending} not attending · ❓ ${noResponse} no response · **${totalResponded}/${totalExpected} responded**\n\n`;
+
+            // Team breakdown: Director → Manager → counts
+            summary += `<details><summary><strong>Breakdown by Team</strong></summary>\n\n`;
+            for (const [dir, managers] of Object.entries(teamTree).sort()) {
+              const dirLabel = dir === 'Unknown Director' ? dir : `@${dir}`;
+              summary += `#### ${dirLabel}\n\n`;
+              for (const [mgr, members] of Object.entries(managers).sort()) {
+                const mgrLabel = mgr === 'Unknown Manager' ? mgr : `@${mgr}`;
+                const a = members.filter(m => m.emoji === '👍').length;
+                const u = members.filter(m => m.emoji === '😐').length;
+                const n = members.filter(m => m.emoji === '👎').length;
+                const nr = members.filter(m => m.emoji === '❓').length;
+                summary += `- **${mgrLabel}** — 👍 ${a} · 😐 ${u} · 👎 ${n} · ❓ ${nr} (${members.length - nr}/${members.length} responded)\n`;
+              }
+              summary += `\n`;
+            }
+            summary += `</details>\n\n`;
+            summary += `_Last updated: ${ts}_\n${marker}\n\n`;
+
+            // ── Remove old summary & reconstruct body ───────────────────
+            const removeSummary = (text) =>
+              text.replace(/<!-- attendance-summary-auto-generated -->[\s\S]*?<!-- attendance-summary-auto-generated -->\s*/g, '')
+                  .replace(/<!-- attendance-summary -->[\s\S]*?<!-- attendance-summary -->\s*/g, '');
+
+            let beforeTable = removeSummary(body.substring(0, body.indexOf(tableMatch[0])));
+            let afterTable  = removeSummary(body.substring(body.indexOf(tableMatch[0]) + tableMatch[0].length));
+
+            const newBody = beforeTable + summary + tableHeader + tableRows + afterTable;
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: newBody
+            });
+
+            // Post confirmation comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: `✅ **Attendance registered for @${username}** — ${attendanceEmoji} ${attendanceStatus.replace('_', ' ')}\n\n_Manager: ${managerLogin ? '@' + managerLogin : 'unknown'} · Director: ${directorLogin ? '@' + directorLogin : 'unknown'}_`
+            });
+
+            console.log('=== Workflow completed successfully ===');
+
+  # Recount summaries when issue body is manually edited
+  recount-summary:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: attendance-${{ github.event.issue.number }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Recount attendance summary
+        uses: actions/github-script@v7
+        env:
+          HUBBERS_TOKEN: ${{ secrets.HUBBERS_READ_TOKEN }}
+        with:
+          script: |
+            const TABLE_RE = /(\|[^\n]*Your Handle[^\n]*\|[\r\n]+\|[-|\s]+\|[\r\n]+)((?:\|[^\n]*(?:\n|$))*?)(?=\n\n|\n[^|]|$)/i;
+            const norm = (n) => n.replace(/[*_]/g, '').trim().toLowerCase();
+
+            // Check if table actually changed
+            const changes = context.payload.changes;
+            if (!changes || !changes.body) return;
+
+            const oldMatch = changes.body.from.match(TABLE_RE);
+            const newMatch = context.payload.issue.body.match(TABLE_RE);
+            if (!oldMatch && !newMatch) return;
+
+            const normWs = (t) => t.split('\n').map(l => l.trimEnd()).join('\n').trim();
+            if (oldMatch && newMatch && normWs(oldMatch[0]) === normWs(newMatch[0])) {
+              console.log('Table unchanged, skipping');
+              return;
+            }
+
+            // Fetch hubbers.yml
+            let hubbers = {};
+            try {
+              const hubbersToken = process.env.HUBBERS_TOKEN;
+              const metaResp = await fetch(
+                'https://api.github.com/repos/github/thehub/contents/docs/_data/hubbers.yml',
+                { headers: { Authorization: `token ${hubbersToken}`, Accept: 'application/vnd.github.v3+json' } }
+              );
+              if (metaResp.ok) {
+                const meta = await metaResp.json();
+                let content;
+                if (meta.size > 1_000_000 || !meta.content) {
+                  const rawResp = await fetch(meta.download_url, { headers: { Authorization: `token ${hubbersToken}` } });
+                  content = await rawResp.text();
+                } else {
+                  content = Buffer.from(meta.content, 'base64').toString('utf-8');
+                }
+                let cur = null, data = {};
+                for (const line of content.split('\n')) {
+                  if (line && !line.startsWith(' ') && !line.startsWith('\t') && line.includes(':')) {
+                    if (cur && data.name) { hubbers[cur] = {...data}; hubbers[cur.toLowerCase()] = {...data}; }
+                    cur = line.split(':')[0].trim(); data = {};
+                  } else if (cur) {
+                    const t = line.trim();
+                    if (t.startsWith('name:'))    data.name    = t.split(':').slice(1).join(':').trim();
+                    if (t.startsWith('manager:')) data.manager = t.split(':').slice(1).join(':').trim();
+                  }
+                }
+                if (cur && data.name) { hubbers[cur] = {...data}; hubbers[cur.toLowerCase()] = {...data}; }
+              }
+            } catch (e) { console.log(`hubbers.yml fetch failed: ${e.message}`); }
+
+            // Re-parse table and rebuild summary
+            const issue = await github.rest.issues.get({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            let body = issue.data.body;
+            const tableMatch = body.match(TABLE_RE);
+            if (!tableMatch) return;
+
+            const headerLine = tableMatch[1].split('\n')[0];
+            const columns = headerLine.split('|').map(c => c.trim()).filter(Boolean);
+            const attIdx = columns.findIndex(c => norm(c) === 'attendance');
+            const handleIdx = columns.findIndex(c => norm(c) === 'your handle');
+            const tableRows = tableMatch[2];
+
+            const teamTree = {};
+            const respondedHandles = new Set();
+            let attending = 0, unsure = 0, notAttending = 0;
+
+            // Build full roster of each manager's ICs from hubbers data
+            const mgrToICs = {};
+            for (const [login, info] of Object.entries(hubbers)) {
+              if (login !== login.toLowerCase()) continue;
+              if (info.manager) {
+                if (!mgrToICs[info.manager]) mgrToICs[info.manager] = new Set();
+                mgrToICs[info.manager].add(login);
+              }
+            }
+
+            for (const row of tableRows.split('\n').filter(r => r.trim().startsWith('|'))) {
+              const cells = row.split('|').map(c => c.trim()).slice(1);
+              if (cells.every(c => !c || /^:?-+:?$/.test(c))) continue;
+              const handle = (cells[handleIdx] || '').replace(/^@/, '').trim();
+              if (!handle) continue;
+              respondedHandles.add(handle.toLowerCase());
+              let emoji = (cells[attIdx] || '').replace(/[*_`]/g, '').trim();
+              if (emoji === '👍') attending++;
+              else if (emoji === '😐') unsure++;
+              else if (emoji === '👎') notAttending++;
+
+              const rowUser = hubbers[handle] || hubbers[handle.toLowerCase()] || {};
+              const rowMgr  = rowUser.manager || 'Unknown Manager';
+              const mgrData = hubbers[rowMgr] || hubbers[rowMgr.toLowerCase()] || {};
+              const rowDir  = mgrData.manager || 'Unknown Director';
+              if (!teamTree[rowDir]) teamTree[rowDir] = {};
+              if (!teamTree[rowDir][rowMgr]) teamTree[rowDir][rowMgr] = [];
+              teamTree[rowDir][rowMgr].push({ handle, emoji });
+            }
+
+            // Find ICs who haven't responded
+            const allManagersInTree = new Set();
+            for (const managers of Object.values(teamTree))
+              for (const mgr of Object.keys(managers)) allManagersInTree.add(mgr);
+
+            let noResponse = 0;
+            for (const mgr of allManagersInTree) {
+              const ics = mgrToICs[mgr] || mgrToICs[mgr.toLowerCase()] || new Set();
+              const mgrData = hubbers[mgr] || hubbers[mgr.toLowerCase()] || {};
+              const dir = mgrData.manager || 'Unknown Director';
+              if (!teamTree[dir]) teamTree[dir] = {};
+              if (!teamTree[dir][mgr]) teamTree[dir][mgr] = [];
+              for (const ic of ics) {
+                if (!respondedHandles.has(ic.toLowerCase())) {
+                  noResponse++;
+                  teamTree[dir][mgr].push({ handle: ic, emoji: '❓' });
+                }
+              }
+            }
+
+            const totalResponded = attending + unsure + notAttending;
+            const totalExpected = totalResponded + noResponse;
+            const MONTH_NAMES = ['January','February','March','April','May','June',
+                                 'July','August','September','October','November','December'];
+            const now = new Date();
+            const ts = `${MONTH_NAMES[now.getUTCMonth()]} ${now.getUTCDate()}, ${now.getUTCFullYear()} at ${
+              (now.getUTCHours() % 12 || 12)}:${String(now.getUTCMinutes()).padStart(2,'0')} ${
+              now.getUTCHours() >= 12 ? 'PM' : 'AM'} UTC`;
+
+            const marker = '<!-- attendance-summary-auto-generated -->';
+            let summary = `${marker}\n`;
+            summary += `**Attendance Summary:** 👍 ${attending} attending · 😐 ${unsure} unsure · 👎 ${notAttending} not attending · ❓ ${noResponse} no response · **${totalResponded}/${totalExpected} responded**\n\n`;
+            summary += `<details><summary><strong>Breakdown by Team</strong></summary>\n\n`;
+            for (const [dir, managers] of Object.entries(teamTree).sort()) {
+              const dirLabel = dir === 'Unknown Director' ? dir : `@${dir}`;
+              summary += `#### ${dirLabel}\n\n`;
+              for (const [mgr, members] of Object.entries(managers).sort()) {
+                const mgrLabel = mgr === 'Unknown Manager' ? mgr : `@${mgr}`;
+                const a = members.filter(m => m.emoji === '👍').length;
+                const u = members.filter(m => m.emoji === '😐').length;
+                const n = members.filter(m => m.emoji === '👎').length;
+                const nr = members.filter(m => m.emoji === '❓').length;
+                summary += `- **${mgrLabel}** — 👍 ${a} · 😐 ${u} · 👎 ${n} · ❓ ${nr} (${members.length - nr}/${members.length} responded)\n`;
+              }
+              summary += `\n`;
+            }
+            summary += `</details>\n\n`;
+            summary += `_Last updated: ${ts}_\n${marker}\n\n`;
+
+            const removeSummary = (text) =>
+              text.replace(/<!-- attendance-summary-auto-generated -->[\s\S]*?<!-- attendance-summary-auto-generated -->\s*/g, '')
+                  .replace(/<!-- attendance-summary -->[\s\S]*?<!-- attendance-summary -->\s*/g, '');
+
+            let beforeTable = removeSummary(body.substring(0, body.indexOf(tableMatch[0])));
+            let afterTable  = removeSummary(body.substring(body.indexOf(tableMatch[0]) + tableMatch[0].length));
+
+            const newBody = beforeTable + summary + tableMatch[1] + tableRows + afterTable;
+
+            await github.rest.issues.update({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: newBody
+            });
+
+            console.log('Summary recounted after manual edit');
