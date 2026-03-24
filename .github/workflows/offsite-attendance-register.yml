@@ -21,7 +21,7 @@ jobs:
       - name: Parse and Update Table
         uses: actions/github-script@v7
         env:
-          HUBBERS_TOKEN: ${{ secrets.HUBBERS_READ_TOKEN }}
+          HUBBERS_TOKEN: ${{ secrets.THEHUB_TOKEN }}
         with:
           script: |
             // ── Shared constants ───────────────────────────────────────
