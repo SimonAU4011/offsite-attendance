@@ -10,12 +10,14 @@
 
 ## Register Your Attendance
 
-> **👉 Type `/attend` in a comment below to register.**
->
-> This opens a form where you select your attendance status and provide travel details.
-> Your manager and team will be automatically populated from hubbers.yml.
+<table><tr><td>
 
----
+### 📋 &nbsp; Type&ensp;<code>/attend</code>&ensp;in the comment box below ⬇️
+
+A form will pop up where you select your attendance status and provide travel details.
+Your **manager** and **team** are automatically filled in from hubbers.yml.
+
+</td></tr></table>
 
 ## Attendance
 
