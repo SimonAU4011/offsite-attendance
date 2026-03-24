@@ -6,7 +6,7 @@ For more details regarding this event please see the <a href="https://github-gri
 
 <table><tr><td>
 
-### 📋 &nbsp; Type&ensp;<code>/attend</code>&ensp;in the comment box below ⬇️
+### 📋 &nbsp; Type&ensp;<code>/attendRKO</code>&ensp;in the comment box below ⬇️
 
 A form will pop up where you select your attendance status and provide travel details.
 Your **manager** and **team** are automatically filled in from hubbers.yml.
@@ -44,4 +44,4 @@ Key   | Description                                    |
 
 ---
 
-_The attendance summary is auto-generated and updates whenever someone registers via `/attend` or the table is manually edited. Do not edit the summary section directly._
+_The attendance summary is auto-generated and updates whenever someone registers via `/attendRKO` or the table is manually edited. Do not edit the summary section directly._

@@ -1,7 +1,7 @@
 # Learn more about the syntax here:
 # https://docs.github.com/early-access/github/save-time-with-slash-commands/syntax-for-user-defined-slash-commands
 ---
-trigger: attend
+trigger: attendRKO
 title: Register Attendance for Offsite
 surfaces:
   - issue

@@ -17,7 +17,7 @@ labels: offsite
 
 <table><tr><td>
 
-### 📋 &nbsp; Type&ensp;<code>/attend</code>&ensp;in the comment box below ⬇️
+### 📋 &nbsp; Type&ensp;<code>/attendRKO</code>&ensp;in the comment box below ⬇️
 
 A form will pop up where you select your attendance status and provide travel details.
 Your **manager** and **team** are automatically filled in from hubbers.yml.
