@@ -22,7 +22,7 @@ Key   | Description                                    |
 
 ---
 
-## Support, Technical and Enterprise
+## Enterprise Support
 
 | Your Handle | Manager | Team | Attendance | Allergies | Dietary Requirements | Arrival Flight | Departure Flight |
 |-------------|---------|------|------------|-----------|---------------------|----------------|-----------------|
