@@ -15,10 +15,10 @@ labels: offsite
 
 ## Register Your Attendance
 
-> **👉 [Click here to register your attendance](../../actions/workflows/offsite-attendance-register.yml)**
+> **👉 Type `/attend` in a comment below to register.**
 >
 > This opens a form where you select your attendance status and provide travel details.
-> Your manager and team will be automatically looked up from hubbers.yml.
+> Your manager and team will be automatically populated from hubbers.yml.
 
 ---
 

@@ -1,0 +1,76 @@
+# Learn more about the syntax here:
+# https://docs.github.com/early-access/github/save-time-with-slash-commands/syntax-for-user-defined-slash-commands
+---
+trigger: attend
+title: Register Attendance for Offsite
+surfaces:
+  - issue
+description: Register your attendance for the offsite
+
+steps:
+  - type: form
+    style: modal
+    body:
+      - type: input
+        attributes:
+          id: microsoft_id
+          label: Microsoft ID
+          description: Your Microsoft employee ID (optional)
+          format: text
+      - type: dropdown
+        attributes:
+          id: attendance_status
+          label: Attendance Status
+          description: Will you attend in-person?
+          options:
+            - label: "👍 Attending in-person"
+              value: "attending"
+            - label: "😐 Unsure"
+              value: "unsure"
+            - label: "👎 Not attending"
+              value: "not_attending"
+      - type: input
+        attributes:
+          id: allergies
+          label: Allergies
+          description: Any allergies we should know about? (optional)
+          format: text
+      - type: input
+        attributes:
+          id: dietary_requirements
+          label: Dietary Requirements
+          description: Any dietary restrictions or preferences? (optional)
+          format: text
+      - type: input
+        attributes:
+          id: arrival_flight
+          label: Arrival Flight
+          description: Date/Time/Airport (e.g., July 19, 2026 / 2:30 PM / LAX)
+          placeholder: "July 19, 2026 / 2:30 PM / LAX"
+          format: text
+      - type: input
+        attributes:
+          id: departure_flight
+          label: Departure Flight
+          description: Date/Time/Airport (e.g., July 25, 2026 / 5:00 PM / LAS)
+          placeholder: "July 25, 2026 / 5:00 PM / LAS"
+          format: text
+    actions:
+      cancel: "Cancel"
+      submit: "Submit"
+  - type: fill
+    template: |-
+      ✅ **Attendance registered for @{{command.user.login}}**
+
+      | Field | Value |
+      |-------|-------|
+      | **Microsoft ID** | {{data.microsoft_id}} |
+      | **Attendance** | {{data.attendance_status}} |
+      | **Allergies** | {{data.allergies}} |
+      | **Dietary Requirements** | {{data.dietary_requirements}} |
+      | **Arrival Flight** | {{data.arrival_flight}} |
+      | **Departure Flight** | {{data.departure_flight}} |
+
+      _Automated tracking enabled — edit the table above to update your details_
+      <!-- Note: Form values are rendered as-is by GitHub's slash command system.
+           The workflow sanitizes all extracted values before updating the table. -->
